@@ -1,0 +1,6 @@
+transformers
+tokenizers
+datasets
+scikit-learn
+sentencepiece
+anytree

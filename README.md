@@ -1,2 +1,2 @@
-# generative_fewshot
+# FewGen
 Generative Fewshot Text Classification

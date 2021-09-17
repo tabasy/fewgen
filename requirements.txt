@@ -1,6 +1,7 @@
-transformers
+transformers==4.10.0
 tokenizers
 datasets
 scikit-learn
 sentencepiece
 anytree
+matplotlib

@@ -17,8 +17,7 @@ from fewgen.dataset import prepare_dataset
 from fewgen.vectorizer import vectorize_by_descriptions, vectorize_by_examples, vectorize_by_nli
 from fewgen.description import Description
 from fewgen.generator import DiverseDescriptionGenerator
-from fewgen.util import load_model
-from fewgen.nli import load_nli
+from fewgen.util import load_model, load_nli
 
 
 sent_end_re = re.compile(r'[.!]')

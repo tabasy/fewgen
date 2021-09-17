@@ -5,7 +5,9 @@ os.environ['hugging_cache_dir'] = '/home/mohsen/thesis/hugging_cache'
 import torch
 from transformers import AutoTokenizer, AutoModel, GPT2LMHeadModel
 from transformers.modeling_utils import PreTrainedModel
-from datasets import load_from_disk, load_dataset
+from datasets import load_from_disk
+from datasets import load_dataset as origin_load_dataset
+
 from collections import OrderedDict
 from cachetools.keys import hashkey
 from cachetools import cached, LRUCache
@@ -84,9 +86,9 @@ def load_dataset(dataset_name, subtask=None):
     dataset_dir = os.path.join(dataset_name, subtask) if subtask else dataset_name
     dataset = load_from_disk(os.path.join(cache_root, 'dataset', dataset_dir))
   elif subtask is None:
-    dataset = load_dataset(dataset_name)
+    dataset = origin_load_dataset(*dataset_name.split('/'))
   else:
-    dataset = load_dataset(dataset_name, subtask)
+    dataset = origin_load_dataset(dataset_name, subtask)
     
   return dataset
 

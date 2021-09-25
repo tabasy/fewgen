@@ -323,3 +323,27 @@ def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, con
     plt.plot(cs, values, label=name)
   plt.legend()
   plt.show()
+
+  
+def show_description_importances(results, markdown=True):
+  
+  report = ''
+  
+  clf = results['classifier']
+  descriptions = results['descriptions']
+  label_names = results['label_names']
+
+  for name, coefs in zip(label_names, clf.coef_):
+    if markdown:
+      report += f'### {name}\n\n'
+    else:
+      report += f'{name}\n'
+      
+    for idx in coefs.argsort()[-1:-4:-1]:
+      if markdown:
+        report += f'`{descriptions[idx]}`: **{coefs[idx]:.3f}**\n\n'
+      else:
+        report += f'{descriptions[idx]}:\t {coefs[idx]:.3f}\n'
+  return report
+            
+            

@@ -1,9 +1,8 @@
 import os
-
-os.environ['hugging_cache_dir'] = '/home/mohsen/thesis/hugging_cache'
+import logging
 
 import torch
-from transformers import AutoTokenizer, AutoModel, GPT2LMHeadModel
+from transformers import AutoTokenizer, AutoModel, GPT2LMHeadModel, AutoModelForSequenceClassification, ZeroShotClassificationPipeline
 from transformers.modeling_utils import PreTrainedModel
 from datasets import load_from_disk
 from datasets import load_dataset as origin_load_dataset
@@ -15,6 +14,27 @@ from cachetools import cached, LRUCache
 from datasets.utils.logging import set_verbosity_error
 
 set_verbosity_error()
+
+
+def pad_lists(lists, pad_value=0):
+  max_len = max(map(len, lists))
+  
+  padded_lists = []
+  
+  for list_ in lists :
+    padded_lists.append(list_ + [pad_value] * (max_len-len(list_)))
+    
+  return padded_lists
+
+
+def set_cache_dir(directory):
+  previous_dir = os.environ.get('hugging_cache_dir')
+  os.environ['hugging_cache_dir'] = directory
+  
+  if previous_dir is None:
+    logging.info(f'cache directory is set to {directory}')
+  else:
+    logging.info(f'cache directory is changed from {previous_dir} to {directory}')
 
 
 def tensor_hashkey(*args):
@@ -47,22 +67,30 @@ def all_to(inputs, device):
   if isinstance(inputs, dict):
     return {k:all_to(v, device) for k, v in inputs.items()}
 
+  
+def resolve_model_path(model_name):
+  
+  cache_root = os.environ.get('hugging_cache_dir')
+  use_cache = cache_root is not None and len(cache_root) > 0
+  
+  path_to_check = os.path.join(model_name, 'pytorch_model.bin')
+  
+  if os.path.exists(path_to_check) or not use_cache:
+    tokenizer_path = model_name
+    model_path = model_name
+    use_cache = os.path.exists(path_to_check)
+  else:
+    tokenizer_path = os.path.join(cache_root, 'tokenizer', model_name)
+    model_path = os.path.join(cache_root, 'model', model_name) 
+  return tokenizer_path, model_path
+
 
 # @cached(LRUCache(maxsize=8))
 def load_model(model_name, device='cuda', tokenizer_only=False):
-    
-  cache_root = os.environ.get('hugging_cache_dir')
-  cache_available = cache_root is not None and len(cache_root) > 0
-  
-  if cache_available:
-    tokenizer_path = os.path.join(cache_root, 'tokenizer', model_name)
-    model_path = os.path.join(cache_root, 'model', model_name)
-  else:
-    tokenizer_path = model_name
-    model_path = model_name
-    
 
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, local_files_only=cache_available)
+  tokenizer_path, model_path = resolve_model_path(model_name)  
+
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
   if tokenizer_only:
     return tokenizer
   
@@ -70,19 +98,18 @@ def load_model(model_name, device='cuda', tokenizer_only=False):
     tokenizer.pad_token = tokenizer.bos_token
     tokenizer.mask_token = tokenizer.bos_token
 
-    model = GPT2LMHeadModel.from_pretrained(model_path, pad_token_id=tokenizer.bos_token_id,
-                                            local_files_only=cache_available)
+    model = GPT2LMHeadModel.from_pretrained(model_path, pad_token_id=tokenizer.bos_token_id)
   else:
-      model = AutoModel.from_pretrained(model_path, local_files_only=cache_available)
+      model = AutoModel.from_pretrained(model_path)
   return tokenizer, model.to(device)
 
 
 def load_dataset(dataset_name, subtask=None):
     
   cache_root = os.environ.get('hugging_cache_dir')
-  cache_available = cache_root is not None and len(cache_root) > 0
-  
-  if cache_available:
+  use_cache = cache_root is not None and len(cache_root) > 0
+
+  if use_cache:
     dataset_dir = os.path.join(dataset_name, subtask) if subtask else dataset_name
     dataset = load_from_disk(os.path.join(cache_root, 'dataset', dataset_dir))
   elif subtask is None:
@@ -100,3 +127,17 @@ def load_nli(model_name, device='cpu'):
     model=model, tokenizer=tokenizer,
     device=-1 if device == 'cpu' else 0
   )
+
+
+def load_clf_model(model_name, num_labels=2, device='cuda'):
+  
+  tokenizer_path, model_path = resolve_model_path(model_name)
+
+  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+  
+  tokenizer.pad_token = tokenizer.eos_token
+  tokenizer.mask_token = tokenizer.bos_token
+
+  model = AutoModelForSequenceClassification.from_pretrained(model_path, num_labels=num_labels,
+                                                            pad_token_id=tokenizer.eos_token_id)
+  return tokenizer, model.to(device)

@@ -51,10 +51,8 @@ def vectorize_nli_pred(pred, desc_map):
   return scores
 
 
-def vectorize_by_nli(texts, model, descriptions):
+def vectorize_by_nli_(texts, model, descriptions):
   
-  descriptions = [desc.get_text(prompt=True) for desc in descriptions]
-  descriptions = list(set(descriptions))
   desc_map = {s: i for i, s in enumerate(descriptions)}
   
   nli_preds = model(texts, candidate_labels=descriptions,
@@ -67,7 +65,39 @@ def vectorize_by_nli(texts, model, descriptions):
   return vectors
 
 
+def vectorize_by_nli(texts, model, descriptions, batch_size=8):
+  
+  descriptions = [desc.get_text(prompt=True) for desc in descriptions]
+  descriptions = list(set(descriptions))
+    
+  vectors = []
+  for i in range(0, len(descriptions), batch_size):
+    batch_descriptions = descriptions[i:i+batch_size]
+    vectors.append(vectorize_by_nli_(texts, model, batch_descriptions))
+
+  vectors = torch.cat(vectors, dim=1)
+
+  return vectors
+
+
 def vectorize_by_embedding(texts, model, tokenizer, mode='avg_emb', batch_size=16):
+  
+  vectors = []
+  
+  for i in tqdm(range(0, len(texts), batch_size)):
+    batch_texts = texts[i: i+batch_size]
+    batch_inputs = tokenize_texts(batch_texts, tokenizer)
+  
+    if mode in ['avg_emb', 'last_emb']:
+      vectors.append(get_embedding(model, batch_inputs, mode=mode))
+    elif mode == 'next_probs':
+      vectors.append(get_next_probs(model, batch_inputs)[0])
+    else:
+      raise ValueError(f'invalid mode: {mode} expcted one of `last_emb`, `avg_emb`, `next_probs`')
+  return torch.cat(vectors, dim=0)
+
+
+def vectorize_by_sequence_classifier(texts, model, tokenizer, mode='avg_emb', batch_size=16):
   
   vectors = []
   

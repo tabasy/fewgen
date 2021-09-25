@@ -7,7 +7,7 @@ from fewgen.util import load_dataset
 TEXT_FIELD_NAMES = ['text', 'sentence', 'review', 'comment']
 
 
-def unify_dataset_fields(dataset):
+def unify_text_fields(dataset, max_length=32):
   
   def unify_text_field(example):
     
@@ -18,8 +18,12 @@ def unify_dataset_fields(dataset):
         new_example['text'] = example[name]
         break
     return new_example
+  
+  def filter_by_length(example):
+    return example['text'].count(' ') < max_length
 
-  return dataset.map(unify_text_field)
+  unified = dataset.map(unify_text_field)
+  return unified.filter(filter_by_length)
 
 
 def balance_dataset(dataset, label_name='label', ex_per_class=-1):
@@ -80,6 +84,15 @@ def reformat_dataset(dataset, rules, templates):
   return dataset.map(apply_templates)
 
 
+def append_prompt(dataset, prompt):
+  
+  def add_prompt(example):
+      example['text'] = example['text'] + prompt
+      return example
+    
+  return dataset.map(add_prompt)
+
+
 def tokenize_dataset(dataset, text_fields, base_model_name='roberta-base',
                      batch_size=32):
   
@@ -99,23 +112,35 @@ def tokenize_dataset(dataset, text_fields, base_model_name='roberta-base',
   return dataset.map(tokenize_batch, batched=True, batch_size=batch_size)
 
 
+def get_dataset_label_names(dataset):
+  if hasattr(dataset.info.features['label'], 'names'):
+    return dataset.info.features['label'].names
+  return list(map(str, sorted(np.unique(dataset['label']).tolist())))
+
+
 def prepare_dataset(dataset_name, subset_name=None, shuffle=False, shuffle_seed=0,
                     train_ex_per_class=16, test_ex_per_class=None,
-                    test_split_name='validation', template=None):
+                    test_split_name='validation', prompt=None):
   
   dataset = load_dataset(dataset_name, subset_name)
   
   
   trainset = dataset['train']
   testset = dataset[test_split_name]
+
+  trainset = unify_text_fields(trainset, max_length=64)
+  testset = unify_text_fields(testset, max_length=64)
   
   if shuffle:
     trainset = trainset.shuffle(shuffle_seed)
     
-  trainset = balance_dataset(trainset, label_name='label', ex_per_class=train_ex_per_class)
-  testset = balance_dataset(testset, label_name='label', ex_per_class=test_ex_per_class)
+  trainset = balance_dataset(trainset.flatten_indices(), label_name='label', ex_per_class=train_ex_per_class)
+  testset = balance_dataset(testset.flatten_indices(), label_name='label', ex_per_class=test_ex_per_class)
   
-  trainset = unify_dataset_fields(trainset)
-  testset = unify_dataset_fields(testset)
+  
+  if prompt is not None and len(prompt.strip()) > 0:
+    prompt = ' ' + prompt.strip()
+    trainset = append_prompt(trainset, prompt)
+    testset = append_prompt(testset, prompt)
   
   return trainset, testset

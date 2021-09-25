@@ -32,7 +32,9 @@ class Description(NodeMixin):
       
   @staticmethod
   def from_text(text, prompt, tokenizer):
-    return Description(tokenizer.encode(text), tokenizer=tokenizer, prompt=prompt)
+    return Description(tokenizer.encode(text, add_special_tokens=False),
+                       tokenizer=tokenizer,
+                       prompt=prompt)
 
   def __init__(self, ids=None, pos_probs=None, neg_probs=None, parent=None, tokenizer=None, prompt=None):
     self.ids = ids or []
@@ -47,13 +49,13 @@ class Description(NodeMixin):
     if prompt is None:
       self.prompt = parent.prompt
     elif isinstance(prompt, str):
-      self.prompt = self.tokenizer.encode(prompt)
+      self.prompt = self.tokenizer.encode(prompt, add_special_tokens=False)
     else:
       self.prompt = prompt
       
   
   def set_prompt(self, prompt):
-    self.prompt = self.tokenizer.encode(prompt)
+    self.prompt = self.tokenizer.encode(prompt, add_special_tokens=False)
     
   def migrate(self, new_tokenizer):
     
@@ -113,9 +115,14 @@ class Description(NodeMixin):
   def absolve(self):
     self.penalty = 1.0
 
-  def get_text(self, inputs=None, prompt=False):
+  def get_text(self, inputs=None, prompt=False, prompt_only=False):
     if inputs is None:
-      ids = self.prompt + self.ids if prompt else self.ids
+      if prompt_only:
+        ids = self.prompt
+      elif prompt:
+        ids = self.prompt + self.ids
+      else:
+        ids = self.ids
       return self.tokenizer.decode(ids)
     else:
       return self.tokenizer.batch_decode(self.extend_inputs(inputs), skip_special_tokens=True)

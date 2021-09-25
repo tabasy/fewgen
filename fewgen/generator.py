@@ -26,6 +26,7 @@ class DiverseDescriptionGenerator:
     self.stop_if_satisfied = True
     self.keep_longest = False
     self.group_best_only = True
+    self.quantile_value = 0.5
     self.log = False
 
 
@@ -96,8 +97,8 @@ class DiverseDescriptionGenerator:
         
         else:   # batch inputs
           for desc in desc_to_generate:
-            pos_probs = get_next_probs(self.lm, extend_batch_input(inputs, desc))[0].quantile(q=0.5, dim=0)
-            neg_probs = None if neg_inputs is None else get_next_probs(self.lm, extend_batch_input(neg_inputs, desc))[0].quantile(q=0.5, dim=0)
+            pos_probs = get_next_probs(self.lm, extend_batch_input(inputs, desc))[0].quantile(q=self.quantile_value, dim=0)
+            neg_probs = None if neg_inputs is None else get_next_probs(self.lm, extend_batch_input(neg_inputs, desc))[0].quantile(q=self.quantile_value, dim=0)
             desc.generate(pos_probs, neg_probs, self.beam_size)
 
       if self.log:
@@ -183,8 +184,8 @@ class DiversePromptGenerator:
           
         for i, cand in enumerate(new_gbeam):
             
-          pos_probs = get_next_probs(self.lm, extend_batch_input(inputs, cand))[0].quantile(q=0.75, dim=0)
-          neg_probs = get_next_probs(self.lm, extend_batch_input(neg_inputs, cand))[0].quantile(q=0.75, dim=0)
+          pos_probs = get_next_probs(self.lm, extend_batch_input(inputs, cand))[0].quantile(q=self.quantile_value, dim=0)
+          neg_probs = get_next_probs(self.lm, extend_batch_input(neg_inputs, cand))[0].quantile(q=self.quantile_value, dim=0)
           all_probs = (pos_probs + neg_probs) / 2.0
           top_indices = all_probs.argsort(descending=True)[:50]
           cand.compute_discrimination_score(pos_probs[top_indices], neg_probs[top_indices])

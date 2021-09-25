@@ -31,10 +31,12 @@ def extend_input(input_, descriptions):
   input_ids = input_ids.repeat(batch_size, 1)
   att_mask = att_mask.repeat(batch_size, 1)
   
-  max_desc_len = max(map(len, descriptions))
+#   max_desc_len = max(map(len, descriptions))
+  max_desc_len = max(map(lambda d: len(d.prompt) + len(d.ids), descriptions))
+  
   ex_ids, ex_mask = [], []
   for desc in descriptions:   
-    desc_ids, desc_mask = desc.to_tensor(prompt=True, pad_to=len(desc.prompt) + max_desc_len)
+    desc_ids, desc_mask = desc.to_tensor(prompt=True, pad_to=max_desc_len)
     ex_ids.append(desc_ids)
     ex_mask.append(desc_mask)
   ex_ids = torch.stack(ex_ids, dim=0).long()
@@ -73,9 +75,11 @@ def get_next_probs(model, inputs):
     
   outputs = model(**prepared_inputs, return_dict=True)
   logits = outputs['logits'].cpu()
-  new_past = all_to(outputs['past_key_values'], 'cuda')
+  new_past = all_to(outputs['past_key_values'], device)
 
-  if past is None:
+  if len(logits.shape) == 2:  # no time dimension (eg. sequence classification model)
+    next_logits = logits[:, :]
+  elif past is None:
     last_non_masked_idx = torch.sum(att_mask, dim=1) - 1
     next_logits = logits[torch.arange(0, batch_size), last_non_masked_idx]
   else:
@@ -111,7 +115,10 @@ def get_embedding(model, inputs, mode='last_emb'):
     return avg_embs.cpu()
     
   elif 'last' in mode:
-    last_indixes = prepared_inputs['position_ids'].argmax(dim=1)  # picks first index if duplicate max occurs
+    if 'position_ids' in prepared_inputs:
+      last_indixes = prepared_inputs['position_ids'].argmax(dim=1)  # picks first index if duplicate max occurs
+    else:
+      last_indixes = att_mask.sum(dim=1) - 1  # picks first index if duplicate max occurs
     last_embs = embeddings[torch.arange(batch_size).to(device), last_indixes.to(device)]
     return last_embs.cpu()
     
@@ -167,34 +174,41 @@ def compute_batch_ppl_change(model, inputs, description):
 
   post_ppl = post_ppl.sum(dim=1) / desc_len
   return (pri_ppl - post_ppl).exp()
-  
-  
+
+
 def compute_ppl_changes(model, input_, descriptions):
   ids, mask = input_
   batch_size = len(descriptions)
   max_input_len = ids.shape[1]
-  prompt_len = len(descriptions[0].prompt)
 
   empty_input = torch.tensor([]).long(), torch.tensor([]).long()
   desc_ids, desc_mask = extend_input(empty_input, descriptions)
   desc_labels = desc_ids.clone()
   desc_labels[desc_mask==0] = -100
-  desc_labels[:, :prompt_len] = -100
+  for i, d in enumerate(descriptions):
+    prompt_len = len(d.prompt)
+    desc_labels[i, :prompt_len] = -100
   
   pri_ppl = compute_ppl(model, (desc_ids, desc_mask), desc_labels)
-#   print(pri_ppl)
-#   print(desc_mask[:, prompt_len:].sum(dim=1))
-  pri_ppl = pri_ppl.sum(dim=1) / desc_mask[:, prompt_len:].sum(dim=1)
+  for i, d in enumerate(descriptions):
+    prompt_len = len(d.prompt)
+    desc_mask[i, :prompt_len] = 0
+  
+  pri_ppl = pri_ppl.sum(dim=1) / desc_mask.sum(dim=1)
   
   full_ids, full_mask = extend_input(input_, descriptions)
   full_labels = full_ids.clone()
   full_labels[full_mask==0] = -100
-  full_labels[:, :max_input_len+prompt_len] = -100
+  for i, d in enumerate(descriptions):
+    prompt_len = len(d.prompt)
+    full_labels[i, :max_input_len+prompt_len] = -100
   
   post_ppl = compute_ppl(model, (full_ids, full_mask), full_labels)
-#   print(post_ppl)
-#   print(full_mask[:, max_input_len+prompt_len:].sum(dim=1))
-  post_ppl = post_ppl.sum(dim=1) / full_mask[:, max_input_len+prompt_len:].sum(dim=1)
+  for i, d in enumerate(descriptions):
+    prompt_len = len(d.prompt)
+    full_mask[i, :max_input_len+prompt_len] = 0
+    
+  post_ppl = post_ppl.sum(dim=1) / full_mask.sum(dim=1)
 #   print(pri_ppl, post_ppl)
   return (pri_ppl - post_ppl).exp()
    

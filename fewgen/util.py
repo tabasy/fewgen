@@ -71,17 +71,16 @@ def all_to(inputs, device):
 def resolve_model_path(model_name):
   
   cache_root = os.environ.get('hugging_cache_dir')
-  use_cache = cache_root is not None and len(cache_root) > 0
   
-  path_to_check = os.path.join(model_name, 'pytorch_model.bin')
+  path_to_check = os.path.join(cache_root, 'model', model_name, 'pytorch_model.bin') 
   
-  if os.path.exists(path_to_check) or not use_cache:
-    tokenizer_path = model_name
-    model_path = model_name
-    use_cache = os.path.exists(path_to_check)
-  else:
+  if os.path.exists(path_to_check):
     tokenizer_path = os.path.join(cache_root, 'tokenizer', model_name)
     model_path = os.path.join(cache_root, 'model', model_name) 
+  else:
+    tokenizer_path = model_name
+    model_path = model_name
+
   return tokenizer_path, model_path
 
 

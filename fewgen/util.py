@@ -107,16 +107,16 @@ def load_model(model_name, device='cuda', tokenizer_only=False):
 def load_dataset(dataset_name, subtask=None):
     
   cache_root = os.environ.get('hugging_cache_dir')
-  use_cache = cache_root is not None and len(cache_root) > 0
-
-  if use_cache:
+  
+  try:
     dataset_dir = os.path.join(dataset_name, subtask) if subtask else dataset_name
     dataset = load_from_disk(os.path.join(cache_root, 'dataset', dataset_dir))
-  elif subtask is None:
-    dataset = origin_load_dataset(*dataset_name.split('/'))
-  else:
-    dataset = origin_load_dataset(dataset_name, subtask)
-    
+  except FileNotFoundError:
+    if subtask is None:
+      dataset = origin_load_dataset(*dataset_name.split('/'))
+    else:
+      dataset = origin_load_dataset(dataset_name, subtask)
+
   return dataset
 
 

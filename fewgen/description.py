@@ -10,12 +10,12 @@ from scipy.stats import spearmanr
 @total_ordering
 class Description(NodeMixin):
   punc_re = re.compile(r'[,:;!?\'"`()�_—-]+')
-  eps = 2e-3
+#   eps = 2e-3
 
   @staticmethod
-  def set_hparams(eps=None, punc_re=None):
-    if eps is not None:
-      Description.eps = eps
+  def set_hparams(punc_re=None):
+#     if eps is not None:
+#       Description.eps = eps
     if punc_re is not None:
       Description.punc_re = re.compile(punc_re)
     
@@ -23,7 +23,7 @@ class Description(NodeMixin):
   def scorer(probs_pos, probs_neg):
     if probs_neg is None or len(probs_neg) == 0:
       return probs_pos
-    return probs_pos / (probs_neg + Description.eps)
+    return probs_pos / probs_neg
 
   @staticmethod
   def reducer(scores):

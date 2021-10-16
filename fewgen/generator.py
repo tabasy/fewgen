@@ -22,6 +22,7 @@ class DiverseDescriptionGenerator:
     self.min_len = 2
     self.max_len = 5
     self.satisfaction = None
+    self.smooth_value = 2e-3
     self.diversity_factor = 0.95
     self.stop_if_satisfied = True
     self.keep_longest = False
@@ -35,6 +36,7 @@ class DiverseDescriptionGenerator:
 
   def batch_generate(self, inputs, neg_inputs=None):
     is_single_input = len(inputs[0]) == 1
+    group_beam_size = self.beam_size // self.num_beam_groups
     descriptions = []
     roots = [Description(tokenizer=self.tokenizer, prompt=self.prompt) for i in range(self.num_beam_groups)]
     group_iters = [LevelOrderGroupIter(root) for root in roots]
@@ -50,10 +52,10 @@ class DiverseDescriptionGenerator:
             desc.penalize(gbeam, factor=self.diversity_factor)
 
         sorted_glevel = sorted(glevel, reverse=True)
-        new_gbeam = sorted_glevel[:self.beam_size]
+        new_gbeam = sorted_glevel[:group_beam_size]
         group_beams.append(new_gbeam)
 
-        for desc in sorted_glevel[self.beam_size:]:
+        for desc in sorted_glevel[group_beam_size:]:
           desc.delete()
           
         desc_to_generate = []
@@ -93,13 +95,13 @@ class DiverseDescriptionGenerator:
           else:
              neg_probs = get_next_probs(self.lm, extend_input(neg_inputs, desc_to_generate))[0]
           for desc, pos_pr, neg_pr in zip(desc_to_generate, pos_probs, neg_probs):
-            desc.generate(pos_pr, neg_pr, self.beam_size)
+            desc.generate(pos_probs+self.smooth_value, neg_probs+self.smooth_value, self.beam_size)
         
         else:   # batch inputs
           for desc in desc_to_generate:
             pos_probs = get_next_probs(self.lm, extend_batch_input(inputs, desc))[0].quantile(q=self.quantile_value, dim=0)
             neg_probs = None if neg_inputs is None else get_next_probs(self.lm, extend_batch_input(neg_inputs, desc))[0].quantile(q=self.quantile_value, dim=0)
-            desc.generate(pos_probs, neg_probs, self.beam_size)
+            desc.generate(pos_probs+self.smooth_value, neg_probs+self.smooth_value, self.beam_size)
 
       if self.log:
         print('='*50)

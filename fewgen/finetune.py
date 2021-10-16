@@ -17,7 +17,8 @@ from datasets import load_dataset, load_from_disk, load_metric
 from fewgen.util import pad_lists
 
 
-def finetune_lm(model, tokenizer, dataset, batch_size=4, epochs=5, save_dir='tuned_model', fewshot=True):
+def finetune_lm(model, tokenizer, dataset, batch_size=4, epochs=20, steps=-1, save_dir='tuned_model',
+                early_stopping_threshold=0.01):
   
   def tokenize_example(example):
     tokenized = {}
@@ -49,18 +50,18 @@ def finetune_lm(model, tokenizer, dataset, batch_size=4, epochs=5, save_dir='tun
                                          batched=True, batch_size=None,
                                          fn_kwargs={'pad_token_id': tokenizer.pad_token_id})
   
-  
   training_args = TrainingArguments(output_dir=save_dir, overwrite_output_dir=True,
-                                    do_train=True, do_eval=True, load_best_model_at_end=not fewshot,  # set load_best_model_at_end=False for real fewshot experiment
+                                    do_train=True, do_eval=True, load_best_model_at_end=True,  # set load_best_model_at_end=False for real fewshot experiment
                                     per_device_train_batch_size=batch_size, per_device_eval_batch_size=batch_size,
                                     gradient_accumulation_steps=16//batch_size,
-                                    evaluation_strategy='epoch', logging_strategy='epoch',
-                                    num_train_epochs=epochs,
+                                    max_steps=steps, num_train_epochs=epochs,
+                                    logging_first_step=True, #logging_steps=steps//5, eval_steps=steps//5,
+                                    evaluation_strategy='epoch', logging_strategy='epoch', save_strategy='epoch', 
                                    )
   
-  
   # data_collator = DataCollatorWithPadding(tokenizer, padding='longest')
-  callbacks = [] if fewshot else [EarlyStoppingCallback(early_stopping_patience=1)]
+#   callbacks = [] if fewshot else [EarlyStoppingCallback(early_stopping_patience=1, early_stopping_threshold=0.01)]
+  callbacks = [EarlyStoppingCallback(early_stopping_patience=1, early_stopping_threshold=early_stopping_threshold)]
   
   trainer = Trainer(
         model=model,
@@ -73,13 +74,14 @@ def finetune_lm(model, tokenizer, dataset, batch_size=4, epochs=5, save_dir='tun
     )
     
   trainer.train()
-  eval_results = trainer.evaluate()
   # trainer.save_model()  # Saves the tokenizer too for easy upload
   
+  eval_results = trainer.evaluate()
   return eval_results
 
 
-def finetune_clf_lm(model, tokenizer, dataset, batch_size=4, epochs=50, save_dir='tuned_model', fewshot=True):
+def finetune_clf_lm(model, tokenizer, dataset, batch_size=4, epochs=20, save_dir='tuned_model',
+                    early_stopping_threshold=0.01):
     
   def tokenize_examples(examples):
     return tokenizer(examples['text'], padding='longest', truncation=True)
@@ -88,13 +90,17 @@ def finetune_clf_lm(model, tokenizer, dataset, batch_size=4, epochs=50, save_dir
   
   steps_per_epoch = len(tokenized_dataset['train']) // 16
   
-  training_args = TrainingArguments(output_dir=save_dir, overwrite_output_dir=True, 
-                                    do_train=True, do_eval=True, load_best_model_at_end=not fewshot,
+  
+  training_args = TrainingArguments(output_dir=save_dir, overwrite_output_dir=True,
+                                    do_train=True, do_eval=True, load_best_model_at_end=True,
                                     per_device_train_batch_size=batch_size, per_device_eval_batch_size=batch_size,
-                                    evaluation_strategy='steps', gradient_accumulation_steps=16//batch_size,
-                                    num_train_epochs=epochs, eval_steps=steps_per_epoch*5, logging_steps=steps_per_epoch*5,
+                                    gradient_accumulation_steps=16//batch_size,
+                                    logging_first_step=True, num_train_epochs=epochs,
+                                    evaluation_strategy='steps', logging_strategy='steps', save_strategy='steps', 
+                                    save_steps=steps_per_epoch*5, eval_steps=steps_per_epoch*5, logging_steps=steps_per_epoch*5,
                                    )
-  callbacks = [] if fewshot else [EarlyStoppingCallback(early_stopping_patience=1)]
+    
+  callbacks = [EarlyStoppingCallback(early_stopping_patience=1, early_stopping_threshold=early_stopping_threshold)]
   
   metric = load_metric('accuracy')
 
@@ -119,4 +125,3 @@ def finetune_clf_lm(model, tokenizer, dataset, batch_size=4, epochs=50, save_dir
   # trainer.save_model()  # Saves the tokenizer too for easy upload
   
   return eval_results
-

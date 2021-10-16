@@ -33,7 +33,8 @@ def satisfaction(desc):
 
 default_config = {
   'generator_model': {'model_name': 'gpt2', 'device': 'cuda'},
-  'vectorizer_model': {'model_name': 'gpt2', 'device': 'cuda', 'finetune': False},
+  'vectorizer_model': {'model_name': 'gpt2', 'device': 'cuda', 
+                       'finetune': {'early_stopping_threshold': 0.01}},
   
   'device': 'cuda',
   'dataset': {
@@ -44,22 +45,22 @@ default_config = {
     'test_ex_per_class': 64,
     'test_split_name': 'validation',
   },
-  'description': {'eps': 5e-3},
   'generator': {
-    'prompt': ' All in all, the movie was',
-    'beam_size': 8,
+    'prompt': ' All in all, the movie is',
+    'beam_size': 16,
     'num_beam_groups': 4,
     'min_len': 2,
     'max_len': 5,
     'satisfaction': satisfaction,
     'diversity_factor': 0.95,
+    'smooth_value': 1e-4,
     'stop_if_satisfied': False,
     'keep_longest': False,
     'group_best_only': True,
     'log': False
   },
   'feature_mode': 'ppl',
-  'feature_reducer': PCA(n_components=2),
+  'feature_processor': StandardScaler(),
   'classifier': LogisticRegression(solver='newton-cg'),
   'plot': True,
 }
@@ -93,9 +94,7 @@ def experiment_fewgen(cfg):
   logging.info(f'loading {dataset_name} dataset')
   trainset, testset = prepare_dataset(**cfg['dataset'])
   label_names = get_dataset_label_names(trainset)
-  
-  Description.set_hparams(**cfg['description'])
-    
+      
   if 'manual_descriptions' in cfg:
     gen_model_name = 'manual'
     vec_tk = load_model(vec_model_name, tokenizer_only=True)
@@ -140,16 +139,18 @@ def experiment_fewgen(cfg):
       vec_tk, vec_lm = load_model(vec_model_name, device=cfg['vectorizer_model']['device'])
     descriptions = [desc.migrate(vec_tk) for desc in descriptions]
     
-    if cfg['vectorizer_model']['finetune']:
+    if cfg['vectorizer_model'].get('finetune', False):
       logging.info(f'finetune {vec_model_name} with our descriptions')
+
       class_descriptions_vec = {}
       for k, descs in class_descriptions.items():
         class_descriptions_vec[k] = [d.migrate(vec_tk) for d in descs]
       finetune_dataset = generate_finetuning_data({'trainset': trainset,
-                                                   'testset': testset[:len(trainset)], 
+                                                   'testset': trainset, # testset[:len(trainset)], 
                                                    'class_descriptions': class_descriptions_vec})
-      batch_size = 2 if 'medium' in vec_model_name else 4
-      finetune_lm(vec_lm, vec_tk, finetune_dataset, batch_size=batch_size)
+      if 'batch_size' not in cfg['vectorizer_model']['finetune']:
+         cfg['vectorizer_model']['finetune']['batch_size'] = 2 if 'medium' in vec_model_name else 4
+      finetune_lm(vec_lm, vec_tk, finetune_dataset, **cfg['vectorizer_model']['finetune'])
 
     logging.info(f'vectorize examples using descriptions')
 
@@ -170,20 +171,19 @@ def experiment_fewgen(cfg):
   
   train_y, test_y = np.array(trainset['label']), np.array(testset['label'])
   
-  reducer, classifier = cfg['feature_reducer'], cfg['classifier']
+  preprocessor, classifier = cfg['feature_processor'], cfg['classifier']
   
-  if reducer is not None:
-    train_x = reducer.fit_transform(train_x)
-    test_x = reducer.transform(test_x)
+  if preprocessor is not None:
+    if hasattr(preprocessor, 'fit'):
+      preprocessor.fit(train_x)
+    train_x = preprocessor.transform(train_x)
+    test_x = preprocessor.transform(test_x)
     logging.info(f'train features reduced to: {train_x.shape}')
     logging.info(f'test features reduced to: {test_x.shape}')   
     
-  classifier.fit(train_x, train_y)
-  train_preds = classifier.predict(train_x)  
-  test_preds = classifier.predict(test_x)
-  
-  train_acc = accuracy_score(train_y, train_preds)
-  test_acc = accuracy_score(test_y, test_preds)  
+  clf_result = run_classifier(cfg['classifier'], train_x, train_y, test_x, test_y)
+  train_acc, test_acc = clf_result['train_acc'], clf_result['test_acc']
+  train_f1, test_f1 = clf_result['train_f1'], clf_result['test_f1']
   
   if cfg['plot']:
     plot_features(train_x, train_y, names=label_names, tsne=False,
@@ -191,8 +191,8 @@ def experiment_fewgen(cfg):
     plot_features(test_x, test_y, names=label_names, tsne=False, 
                   title=f'{dataset_name}/{gen_model_name}/{vec_model_name}: test acc: {test_acc}')
     
-  logging.info(f'train acc: {train_acc}')
-  logging.info(f'test acc: {test_acc}')
+  logging.info(f'train acc: {train_acc}\t\ttest acc: {test_acc}')
+  logging.info(f'train f1: {train_f1}\t\ttest f1: {test_f1}')
   
   return {
     'trainset': trainset,
@@ -204,12 +204,37 @@ def experiment_fewgen(cfg):
     'test_x': test_x,
     'train_y': train_y,
     'test_y': test_y,
+    'feature_processor': preprocessor,
     'classifier': classifier,
     'train_acc': train_acc, 
     'test_acc': test_acc, 
+    'train_f1': train_f1, 
+    'test_f1': test_f1, 
   }
 
 
+def multi_experiment(experiment_func, cfg, seeds):
+  
+  all_results = []
+  n = len(seeds)
+  
+  for seed in seeds:
+    cfg['dataset']['shuffle_seed'] = seed
+    all_results.append(experiment_func(cfg))
+    
+  # list of dicts -> dict of lists
+  agg_results = {k: [results[k] for results in all_results] for k in all_results[0]}
+  
+  # aggregate metrics using mean, std 
+  for split_name in ['train', 'test']:
+    for metric_name in ['acc', 'f1']:
+      key = f'{split_name}_{metric_name}'
+      agg_results[f'{key}_mean'] = np.mean(agg_results[key])
+      agg_results[f'{key}_std'] = np.std(agg_results[key])
+  
+  return agg_results
+
+    
 def generate_finetuning_data(results, reverse_train=False, reverse_test=False, save_dir=None):   # use ppl change to select better descriptions for each example
   trainset, testset = results['trainset'], results['testset']
   class_descriptions = results['class_descriptions']
@@ -295,7 +320,7 @@ def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, con
     plot_confusion_matrix(logreg_result['classifier'], test_x, test_y, display_labels=label_names)  
     plt.show()
   
-  ks, knn_results = list(range(1, 30)), {'test_acc': [], 'test_f1': []}
+  ks, knn_results = list(range(1, min(32, len(train_x)-1))), {'test_acc': [], 'test_f1': []}
 
   for k in ks:
     knn = KNeighborsClassifier(n_neighbors=k)
@@ -318,28 +343,31 @@ def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, con
     for name, values in svm_results.items():
       values.append(svm_result[name])
   
-  plt.title('KNN')
+  plt.title('SVM')
   for name, values in svm_results.items():
     plt.plot(cs, values, label=name)
   plt.legend()
   plt.show()
 
   
-def show_description_importances(results, markdown=True):
+def show_description_importances(results, markdown=True, k=3):
   
   report = ''
   
-  clf = results['classifier']
+  class_coefs = results['classifier'].coef_
+  if class_coefs.shape[0] == 1:
+    class_coefs = np.concatenate([-class_coefs, class_coefs])
+    
   descriptions = results['descriptions']
   label_names = results['label_names']
 
-  for name, coefs in zip(label_names, clf.coef_):
+  for name, coefs in zip(label_names, class_coefs):
     if markdown:
       report += f'### {name}\n\n'
     else:
       report += f'{name}\n'
       
-    for idx in coefs.argsort()[-1:-4:-1]:
+    for idx in coefs.argsort()[-1:-(k+1):-1]:
       if markdown:
         report += f'`{descriptions[idx]}`: **{coefs[idx]:.3f}**\n\n'
       else:

@@ -2,10 +2,14 @@ import os
 import logging
 
 import torch
+import numpy as np
 from transformers import AutoTokenizer, AutoModel, GPT2LMHeadModel, AutoModelForSequenceClassification, ZeroShotClassificationPipeline
 from transformers.modeling_utils import PreTrainedModel
 from datasets import load_from_disk
 from datasets import load_dataset as origin_load_dataset
+from sklearn.manifold import TSNE
+from sklearn.metrics import accuracy_score, f1_score, ConfusionMatrixDisplay, plot_confusion_matrix
+from matplotlib import pyplot as plt
 
 from collections import OrderedDict
 from cachetools.keys import hashkey
@@ -140,3 +144,49 @@ def load_clf_model(model_name, num_labels=2, device='cuda'):
   model = AutoModelForSequenceClassification.from_pretrained(model_path, num_labels=num_labels,
                                                             pad_token_id=tokenizer.eos_token_id)
   return tokenizer, model.to(device)
+
+
+def plot_features(features, labels, names=None, tsne=True, title=None):
+  unique_labels = sorted(np.unique(labels).tolist())
+  
+  if title:
+    plt.title(title)
+  if tsne and features.shape[-1] > 2:
+    features = TSNE(n_components=2, perplexity=len(features)/len(unique_labels)).fit_transform(features)
+  
+  if features.shape[-1] >= 2:
+    for label, name in zip(unique_labels, names):
+      plt.scatter(features[labels==label][:, 0], features[labels==label][:, 1], label=name, alpha=0.75)
+  else:
+    for label, name in zip(unique_labels, names):
+      plt.hist(features[labels==label][:, 0], bins=min(16, len(features)//4), label=name, alpha=0.75)
+  plt.legend()
+  plt.show()
+
+  
+def boxplot_dataframe(df, column=None, linewidth=3, layout=(1, 2), figsize=(16, 6), fontsize=14, 
+            showfliers=True, showmeans=True, **kwargs):
+  boxprops = dict(linestyle='-', linewidth=linewidth, color='C0')
+  medianprops = dict(linestyle='-', linewidth=linewidth, color='C3')
+  capprops = dict(linestyle='-', linewidth=linewidth, color='C7')
+  whiskerprops = dict(linestyle='--', linewidth=linewidth, color='C7')
+  meanprops = dict(linestyle='-', linewidth=linewidth, color='C2')
+
+  df.boxplot(by='label_name', column=column, 
+             layout=layout, figsize=figsize, fontsize=fontsize, showfliers=showfliers, showmeans=True,
+             capprops=capprops, whiskerprops=whiskerprops, boxprops=boxprops, medianprops=medianprops, meanprops=meanprops, **kwargs)
+  plt.show()
+  
+  
+def run_classifier(clf, train_x, train_y, test_x, test_y):
+  clf.fit(train_x, train_y)
+  train_preds = clf.predict(train_x)
+  test_preds = clf.predict(test_x)
+  
+  return {
+    'classifier': clf,
+    'train_acc': accuracy_score(train_y, train_preds),
+    'test_acc': accuracy_score(test_y, test_preds),
+    'train_f1': f1_score(train_y, train_preds, average='macro'),
+    'test_f1': f1_score(test_y, test_preds, average='macro'),
+  }

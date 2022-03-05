@@ -1,5 +1,5 @@
 #@title description class
-import re
+import re, json
 import torch
 from functools import total_ordering
 from anytree import NodeMixin
@@ -31,7 +31,12 @@ class Description(NodeMixin):
     return torch.exp(torch.mean(log_scores))
       
   @staticmethod
-  def from_text(text, prompt, tokenizer):
+  def from_text(text=None, prompt=None, tokenizer=None, full=None):
+    if full:
+      prompt, text = full.split('/')
+      prompt = ' ' + prompt.strip()
+      text =  ' ' + text.strip()
+
     return Description(tokenizer.encode(text, add_special_tokens=False),
                        tokenizer=tokenizer,
                        prompt=prompt)
@@ -118,12 +123,11 @@ class Description(NodeMixin):
   def get_text(self, inputs=None, prompt=False, prompt_only=False):
     if inputs is None:
       if prompt_only:
-        ids = self.prompt
+        return self.tokenizer.decode(self.prompt)
       elif prompt:
-        ids = self.prompt + self.ids
+        return self.tokenizer.decode(self.prompt) + ' /' + self.tokenizer.decode(self.ids)
       else:
-        ids = self.ids
-      return self.tokenizer.decode(ids)
+        return self.tokenizer.decode(self.ids)
     else:
       return self.tokenizer.batch_decode(self.extend_inputs(inputs), skip_special_tokens=True)
 
@@ -165,6 +169,39 @@ class Description(NodeMixin):
       return f'Description(text="{self.get_text()}", score={self.get_score():.4f})'
     else:
       return f'Description(text="{self.get_text()}", score={self.get_score():.4f}, penalty={self.penalty:.4f})'
+
+    
+def save_descriptions(c2d, path, names, params=None):
+  
+  jdata = {'descriptions': {}}
+  
+  if params:
+    jdata['params'] = params
+  
+  for c, ds in c2d.items():
+    name = names[c]
+    jdata['descriptions'][name] = [d.get_text(prompt=True, prompt_only=False) for d in ds]
+  
+  with open(path, 'w', encoding='utf8') as outf:
+    json.dump(jdata, outf, ensure_ascii=False, indent=2)
+
+    
+def load_descriptions(path, names, num_desc=0):
+  
+  with open(path, encoding='utf8') as inf:
+    jdesc = json.load(inf)
+  
+  c2d = {}
+  
+  for name, ds in jdesc['descriptions'].items():
+    c = names.index(name)
+
+    if num_desc > 0:
+      c2d[c] = ds[:num_desc]
+    else:
+      c2d[c] = ds
+      
+  return c2d
 
     
 class Prompt(Description):

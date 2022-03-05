@@ -7,7 +7,7 @@ from fewgen.util import load_dataset
 TEXT_FIELD_NAMES = ['text', 'sentence', 'review', 'comment']
 
 
-def unify_text_fields(dataset, max_length=32):
+def unify_text_fields(dataset, drop_longer_than=0, truncate_longer_than=0):
   
   def unify_text_field(example):
     
@@ -15,15 +15,22 @@ def unify_text_fields(dataset, max_length=32):
     
     for name in TEXT_FIELD_NAMES:
       if name in example:
+        text = example[name]
+        if truncate_longer_than > 0:
+          text = ' '.join(text.split(' ')[:truncate_longer_than])
         new_example['text'] = example[name]
         break
     return new_example
   
   def filter_by_length(example):
-    return example['text'].count(' ') < max_length
+    return example['text'].count(' ') <= drop_longer_than
 
   unified = dataset.map(unify_text_field)
-  return unified.filter(filter_by_length)
+  
+  if drop_longer_than > 0:
+    unified = unified.filter(filter_by_length)
+    
+  return unified
 
 
 def balance_dataset(dataset, label_name='label', ex_per_class=-1):
@@ -128,8 +135,8 @@ def prepare_dataset(dataset_name, subset_name=None, shuffle=False, shuffle_seed=
   trainset = dataset['train']
   testset = dataset[test_split_name]
 
-  trainset = unify_text_fields(trainset, max_length=64)
-  testset = unify_text_fields(testset, max_length=64)
+  trainset = unify_text_fields(trainset, drop_longer_than=64)
+  testset = unify_text_fields(testset, truncate_longer_than=128)
   
   if shuffle:
     trainset = trainset.shuffle(shuffle_seed)

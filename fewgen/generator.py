@@ -1,3 +1,5 @@
+import re, os
+
 import torch
 from anytree import LevelOrderGroupIter
 from tqdm.auto import tqdm
@@ -5,6 +7,14 @@ from tqdm.auto import tqdm
 from fewgen.description import Description, Prompt
 from fewgen.inference import *
 from fewgen.util import *
+
+sent_end_re = re.compile(r'[.!]')
+
+
+def satisfaction(desc):
+  text = desc.get_text()
+  has_punc = len(sent_end_re.findall(text)) > 0
+  return has_punc
 
 
 class DiverseDescriptionGenerator:
@@ -19,9 +29,8 @@ class DiverseDescriptionGenerator:
     self.prompt = None
     self.beam_size = 16
     self.num_beam_groups = 4
-    self.min_len = 2
     self.max_len = 5
-    self.satisfaction = None
+    self.satisfaction = satisfaction
     self.smooth_value = 2e-3
     self.diversity_factor = 0.95
     self.stop_if_satisfied = True
@@ -29,10 +38,18 @@ class DiverseDescriptionGenerator:
     self.group_best_only = True
     self.quantile_value = 0.5
     self.log = False
-
+    
+    self.model_name = self.lm.config._name_or_path.split('/')[-1]
 
   def set_hparams(self, **hparams):
     self.__dict__.update(hparams)
+    
+  def get_hparams(self):
+    hparams = {}
+    for param in ['model_name', 'prompt', 'beam_size', 'max_len', 'smooth_value',
+                  'diversity_factor', 'quantile_value', 'group_best_only']:
+      hparams[param] = self.__dict__[param]
+    return hparams
 
   def batch_generate(self, inputs, neg_inputs=None):
     is_single_input = len(inputs[0]) == 1
@@ -116,6 +133,8 @@ class DiverseDescriptionGenerator:
 
   def generate_class_descriptions(self, texts, labels):
 
+    torch.manual_seed(int(os.environ.get('seed', '110')))
+    
     ids, masks = tokenize_texts(texts, self.tokenizer)
     labels = torch.tensor(labels)
     descriptions = {}
@@ -153,7 +172,6 @@ class DiversePromptGenerator:
     self.prompt = ''
     self.beam_size = 16
     self.num_beam_groups = 4
-    self.min_len = 2
     self.max_len = 5
     self.diversity_factor = 0.95
     self.min_discrimination_score = -0.98
@@ -214,6 +232,8 @@ class DiversePromptGenerator:
     return prompts
 
   def generate_discriminative_prompts(self, texts, labels):
+    
+    torch.manual_seed(int(os.environ.get('seed', '110')))
 
     ids, masks = tokenize_texts(texts, self.tokenizer)
     labels = torch.tensor(labels)

@@ -1,4 +1,5 @@
-import os, re
+import re, copy
+import os, re, json
 from random import choice
 import logging
 
@@ -12,102 +13,108 @@ from sklearn.neighbors import KNeighborsClassifier
 from sklearn.svm import SVC
 from sklearn.manifold import TSNE
 from sklearn.metrics import accuracy_score, f1_score, ConfusionMatrixDisplay, plot_confusion_matrix
+from sklearn.pipeline import Pipeline
+from sklearn.base import clone
 from matplotlib import pyplot as plt
 
 from fewgen.dataset import prepare_dataset, get_dataset_label_names
 from fewgen.vectorizer import vectorize_by_descriptions, vectorize_by_examples, vectorize_by_nli
-from fewgen.description import Description
+from fewgen.description import Description, save_descriptions, load_descriptions
 from fewgen.generator import DiverseDescriptionGenerator
-from fewgen.finetune import finetune_lm
-from fewgen.util import load_model, load_nli
+from fewgen.finetune import finetune_lm, generate_finetuning_data
+from fewgen.util import load_model, load_nli, run_classifier, plot_features
+from fewgen.explain import log_results_by_example
 
 
-sent_end_re = re.compile(r'[.!]')
+DESC_DIR = 'descriptions'
+EXP_DIR = 'experiments'
+EXP_LOG_PATH = os.path.join(EXP_DIR, 'fewgen.jsonl')
 
-
-def satisfaction(desc):
-  text = desc.get_text()
-  has_punc = len(sent_end_re.findall(text)) > 0
-  return has_punc
+os.makedirs(DESC_DIR, exist_ok=True)
+os.makedirs(EXP_DIR, exist_ok=True)
 
 
 default_config = {
-  'generator_model': {'model_name': 'gpt2', 'device': 'cuda'},
-  'vectorizer_model': {'model_name': 'gpt2', 'device': 'cuda', 
-                       'finetune': {'early_stopping_threshold': 0.01}},
+  'model': {
+    'generator_model_name': 'gpt2',
+    'vectorizer_model_name': 'gpt2', 
+    'generator_device': 'cuda',
+    'vectorizer_device': 'cuda',
+    'finetune': False
+  },
   
-  'device': 'cuda',
   'dataset': {
-    'dataset_name': 'glue/sst2',
-    'shuffle': False, 
-    'shuffle_seed': 0,
+    'dataset_name': 'ag_news',
+    'shuffle': True, 
+    'shuffle_seed': 110,
     'train_ex_per_class': 16,
     'test_ex_per_class': 64,
-    'test_split_name': 'validation',
+    'test_split_name': 'test',
   },
+  
+  'description': {
+    'manual': False,
+    'num_descriptions': 4,
+  },
+  
   'generator': {
-    'prompt': ' All in all, the movie is',
+    'prompt': ' This is all about',
     'beam_size': 16,
     'num_beam_groups': 4,
-    'min_len': 2,
     'max_len': 5,
-    'satisfaction': satisfaction,
-    'diversity_factor': 0.95,
-    'smooth_value': 1e-4,
+    'diversity_factor': 0.9,
+    'smooth_value': 1e-3,
     'stop_if_satisfied': False,
     'keep_longest': False,
     'group_best_only': True,
     'log': False
   },
   'feature_mode': 'ppl',
-  'feature_processor': StandardScaler(),
-  'classifier': LogisticRegression(solver='newton-cg'),
+  'classifier': {'no_l2': Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(solver='saga', penalty='none'))]),
+                 'l2_1.0': Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(solver='saga', penalty='l2', C=1.0))]),
+                 'l2_0.1': Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(solver='saga', penalty='l2', C=0.1))]),
+                 'l2_0.01': Pipeline([('scaler', StandardScaler()), ('logreg', LogisticRegression(solver='saga', penalty='l2', C=0.01))])
+                },
   'plot': True,
 }
-
-
-def plot_features(features, labels, names=None, tsne=True, title=None):
-  unique_labels = sorted(np.unique(labels).tolist())
   
-  if title:
-    plt.title(title)
-  if tsne and features.shape[-1] > 2:
-    features = TSNE(n_components=2, perplexity=len(features)/len(unique_labels)).fit_transform(features)
-  
-  if features.shape[-1] >= 2:
-    for label, name in zip(unique_labels, names):
-      plt.scatter(features[labels==label][:, 0], features[labels==label][:, 1], label=name, alpha=0.75)
-  else:
-    for label, name in zip(unique_labels, names):
-      plt.hist(features[labels==label][:, 0], bins=min(16, len(features)//4), label=name, alpha=0.75)
-  plt.legend()
-  plt.show()
+
+def get_default_cfg():
+  return copy.deepcopy(default_config)
 
   
 def experiment_fewgen(cfg):
-  gen_model_name = cfg['generator_model']['model_name']
-  vec_model_name = cfg['vectorizer_model']['model_name']
-  prompt = cfg['generator']['prompt']
   
-  dataset_name = cfg['dataset']['dataset_name']
+  model_cfg, data_cfg = cfg['model'], cfg['dataset']
+  desc_cfg, gen_cfg = cfg['description'], cfg['generator']
   
+  gen_model_name = model_cfg['generator_model_name']
+  vec_model_name = model_cfg['vectorizer_model_name']
+  prompt = gen_cfg['prompt']
+  
+  dataset_name = data_cfg['dataset_name'].replace('/', '_')
+  os.makedirs(os.path.join(DESC_DIR, dataset_name), exist_ok=True)
+  os.makedirs(os.path.join(EXP_DIR, dataset_name), exist_ok=True)
+
   logging.info(f'loading {dataset_name} dataset')
   trainset, testset = prepare_dataset(**cfg['dataset'])
   label_names = get_dataset_label_names(trainset)
+  train_size = len(trainset['text'])
       
-  if 'manual_descriptions' in cfg:
+  if desc_cfg['manual']:
     gen_model_name = 'manual'
     vec_tk = load_model(vec_model_name, tokenizer_only=True)
     
+    num_desc = desc_cfg['num_descriptions']
+
+    desc_path = os.path.join(DESC_DIR, dataset_name, 'manual.json')
+    manual_descriptions = load_descriptions(desc_path, label_names, num_desc)
+    
     class_descriptions = {}
-    for k, man_descs in cfg['manual_descriptions'].items():
+    for k, man_descs in manual_descriptions.items():
       class_descriptions[k] = []
       for man_desc in man_descs:
-        if isinstance(man_desc, str):
-          desc = Description.from_text(desc, prompt, vec_tk)
-        else:
-          prompt, desc = man_desc
-          desc = Description.from_text(text=desc, prompt=prompt, tokenizer=vec_tk)
+        desc = Description.from_text(tokenizer=vec_tk, full=man_desc)
         class_descriptions[k].append(desc)
             
     descriptions = sum(class_descriptions.values(), [])
@@ -116,13 +123,20 @@ def experiment_fewgen(cfg):
     
   else:
     logging.info(f'load {gen_model_name} language model')
-    gen_tk, gen_lm = load_model(gen_model_name, device=cfg['generator_model']['device'])
+    gen_cfg['num_beam_groups'] = desc_cfg['num_descriptions']
+    
+    gen_tk, gen_lm = load_model(gen_model_name, device=model_cfg['generator_device'])
 
     generator = DiverseDescriptionGenerator(model=gen_lm, tokenizer=gen_tk)
-    generator.set_hparams(**cfg['generator'])
-
+    generator.set_hparams(**gen_cfg)
+    
     logging.info(f'generate descriptions:')
     class_descriptions = generator.generate_class_descriptions(trainset['text'], trainset['label'])
+    prompt_hash = generator.prompt.replace(' ', '_')
+    desc_path = os.path.join(DESC_DIR, dataset_name, f'{gen_model_name.split("/")[-1].replace("-", "")}'\
+                             f'-{prompt_hash}-{data_cfg["shuffle_seed"]}-{generator.beam_size}-{generator.smooth_value}-{generator.max_len}.json')
+    save_descriptions(class_descriptions, desc_path, label_names, generator.get_hparams())
+    
     descriptions = sum(class_descriptions.values(), [])
     logging.info('\n'.join(map(str, descriptions)))
     
@@ -136,21 +150,29 @@ def experiment_fewgen(cfg):
       vec_tk, vec_lm = gen_tk, gen_lm
     else:
       logging.info(f'load {vec_model_name} language model')
-      vec_tk, vec_lm = load_model(vec_model_name, device=cfg['vectorizer_model']['device'])
+      vec_tk, vec_lm = load_model(vec_model_name, device=model_cfg['vectorizer_device'])
     descriptions = [desc.migrate(vec_tk) for desc in descriptions]
     
-    if cfg['vectorizer_model'].get('finetune', False):
+    if model_cfg['finetune']:
       logging.info(f'finetune {vec_model_name} with our descriptions')
-
       class_descriptions_vec = {}
       for k, descs in class_descriptions.items():
         class_descriptions_vec[k] = [d.migrate(vec_tk) for d in descs]
       finetune_dataset = generate_finetuning_data({'trainset': trainset,
                                                    'testset': trainset, # testset[:len(trainset)], 
                                                    'class_descriptions': class_descriptions_vec})
-      if 'batch_size' not in cfg['vectorizer_model']['finetune']:
-         cfg['vectorizer_model']['finetune']['batch_size'] = 2 if 'medium' in vec_model_name else 4
-      finetune_lm(vec_lm, vec_tk, finetune_dataset, **cfg['vectorizer_model']['finetune'])
+      
+      ft_kwargs = model_cfg['finetune']
+      ft_kwargs = ft_kwargs if isinstance(ft_kwargs, dict) else {}
+      if 'batch_size' not in ft_kwargs:
+        if 'large' in vec_model_name:
+          ft_kwargs['batch_size'] = 1 
+        elif 'medium' in vec_model_name:
+          ft_kwargs['batch_size'] = 2 
+        else:
+          ft_kwargs['batch_size'] = 4 
+          
+      finetune_lm(vec_lm, vec_tk, finetune_dataset, **ft_kwargs)
 
     logging.info(f'vectorize examples using descriptions')
 
@@ -159,7 +181,7 @@ def experiment_fewgen(cfg):
 
   else:   # nli
     logging.info(f'load {vec_model_name} nli model')
-    vec_nli = load_nli(vec_model_name, device=cfg['vectorizer_model']['device'])
+    vec_nli = load_nli(vec_model_name, device=model_cfg['vectorizer_device'])
 
     logging.info(f'vectorize examples using nli')
 
@@ -171,30 +193,42 @@ def experiment_fewgen(cfg):
   
   train_y, test_y = np.array(trainset['label']), np.array(testset['label'])
   
-  preprocessor, classifier = cfg['feature_processor'], cfg['classifier']
+  classifier = cfg['classifier']
   
-  if preprocessor is not None:
-    if hasattr(preprocessor, 'fit'):
-      preprocessor.fit(train_x)
-    train_x = preprocessor.transform(train_x)
-    test_x = preprocessor.transform(test_x)
-    logging.info(f'train features reduced to: {train_x.shape}')
-    logging.info(f'test features reduced to: {test_x.shape}')   
-    
-  clf_result = run_classifier(cfg['classifier'], train_x, train_y, test_x, test_y)
-  train_acc, test_acc = clf_result['train_acc'], clf_result['test_acc']
-  train_f1, test_f1 = clf_result['train_f1'], clf_result['test_f1']
+  train_acc, test_acc = 0, 0
+  train_f1, test_f1 = 0, 0
   
-  if cfg['plot']:
-    plot_features(train_x, train_y, names=label_names, tsne=False,
-                  title=f'{dataset_name}/{gen_model_name}/{vec_model_name}: train acc: {train_acc}')
-    plot_features(test_x, test_y, names=label_names, tsne=False, 
-                  title=f'{dataset_name}/{gen_model_name}/{vec_model_name}: test acc: {test_acc}')
+  clf_results, classifiers = {}, {}
+  main_clf_name = 'l2_1.0'
+  
+  for clf_name, clf in cfg['classifier'].items():
+    clf_results[clf_name] = run_classifier(cfg['classifier'][clf_name], train_x, train_y, test_x, test_y)
+    classifiers[clf_name] = clf_results[clf_name].pop('classifier')
+
+    single_results = get_single_performance(clone(cfg['classifier'][clf_name]), train_x, train_y, test_x, test_y)
     
+    experiment_log = clf_results[clf_name].copy()
+    experiment_log['classifier'] = clf_name
+    experiment_log['single_f1_min'] = single_results['single_f1'].min()
+    experiment_log['single_f1_max'] = single_results['single_f1'].max()
+    experiment_log['single_f1_mean'] = single_results['single_f1'].mean()
+    experiment_log['single_acc_min'] = single_results['single_acc'].min()
+    experiment_log['single_acc_max'] = single_results['single_acc'].max()
+    experiment_log['single_acc_mean'] = single_results['single_acc'].mean()
+    
+    for sub_cfg in [model_cfg, data_cfg, desc_cfg, gen_cfg]:
+      experiment_log.update(sub_cfg)
+
+    with open(EXP_LOG_PATH, 'a') as logf:
+      logf.write(json.dumps(experiment_log) + '\n')
+      
+  train_acc, test_acc = clf_results[main_clf_name]['train_acc'], clf_results[main_clf_name]['test_acc']
+  train_f1, test_f1 = clf_results[main_clf_name]['train_f1'], clf_results[main_clf_name]['test_f1']
+      
   logging.info(f'train acc: {train_acc}\t\ttest acc: {test_acc}')
   logging.info(f'train f1: {train_f1}\t\ttest f1: {test_f1}')
   
-  return {
+  results = {
     'trainset': trainset,
     'testset': testset,
     'label_names': label_names,
@@ -204,13 +238,25 @@ def experiment_fewgen(cfg):
     'test_x': test_x,
     'train_y': train_y,
     'test_y': test_y,
-    'feature_processor': preprocessor,
-    'classifier': classifier,
+    'classifier': classifiers[main_clf_name],
     'train_acc': train_acc, 
     'test_acc': test_acc, 
     'train_f1': train_f1, 
     'test_f1': test_f1, 
+    'clf_results': clf_results,
   }
+
+  model_name = vec_model_name.split("/")[-1].replace("-", "")
+  manual = 'manual' if  desc_cfg['manual'] else 'auto'
+  finetune = 'tuned' if  model_cfg['finetune'] else 'raw'
+  
+  train_log_path = os.path.join(EXP_DIR, dataset_name, f'{model_name}-{manual}-{finetune}-{data_cfg["shuffle_seed"]}-train.tsv')
+  test_log_path = train_log_path.replace('train.tsv', 'test.tsv')
+  
+  log_results_by_example(results, train=True, path=train_log_path)
+  log_results_by_example(results, train=False, path=test_log_path)
+  
+  return results
 
 
 def multi_experiment(experiment_func, cfg, seeds):
@@ -234,61 +280,6 @@ def multi_experiment(experiment_func, cfg, seeds):
   
   return agg_results
 
-    
-def generate_finetuning_data(results, reverse_train=False, reverse_test=False, save_dir=None):   # use ppl change to select better descriptions for each example
-  trainset, testset = results['trainset'], results['testset']
-  class_descriptions = results['class_descriptions']
-
-  train_data = {'text': [], 'prompt': [], 'description': [], 'full': []}
-  test_data = {'text': [], 'prompt': [], 'description': [], 'full': []}
-  
-  lebel_set = set(trainset['label'])
-  
-  for text, label in zip(trainset['text'], trainset['label']):
-    if reverse_train:
-      label = choice(list(lebel_set - {label}))
-    for desc in class_descriptions[label]:
-      train_data['text'].append(text)
-      train_data['prompt'].append(desc.get_text(prompt_only=True))
-      train_data['description'].append(desc.get_text(prompt=False))
-      train_data['full'].append(f'{text.strip()} {desc.get_text(prompt=True)}')
-  
-  for text, label in zip(testset['text'], testset['label']):
-    if reverse_test:
-      label = choice(list(lebel_set - {label}))
-    for desc in class_descriptions[label]:
-      test_data['text'].append(text)
-      test_data['prompt'].append(desc.get_text(prompt_only=True))
-      test_data['description'].append(desc.get_text(prompt=False))
-      test_data['full'].append(f'{text.strip()} {desc.get_text(prompt=True)}')
-      
-  datasets = DatasetDict({
-    'train': Dataset.from_dict(train_data),
-    'validation': Dataset.from_dict(test_data),
-    'test': Dataset.from_dict(test_data), 
-    }
-  )
-  
-  if save_dir:
-    os.makedirs(save_dir, exist_ok=True)
-    datasets.save_to_disk(save_dir)
-      
-  return datasets
-
-
-def run_classifier(clf, train_x, train_y, test_x, test_y):
-  clf.fit(train_x, train_y)
-  train_preds = clf.predict(train_x)
-  test_preds = clf.predict(test_x)
-  
-  return {
-    'classifier': clf,
-    'train_acc': accuracy_score(train_y, train_preds),
-    'test_acc': accuracy_score(test_y, test_preds),
-    'train_f1': f1_score(train_y, train_preds, average='macro'),
-    'test_f1': f1_score(test_y, test_preds, average='macro'),
-  }
-          
 
 def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, conf_mat=True):
 
@@ -317,7 +308,7 @@ def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, con
   
   if conf_mat:
 #     ConfusionMatrixDisplay.from_predictions(test_x, test_y, display_labels=label_names)  
-    plot_confusion_matrix(logreg_result['classifier'], test_x, test_y, display_labels=label_names)  
+    plot_confusion_matrix(logreg_result['classifier'], test_x, test_y, display_labels=label_names, normalize='true', xticks_rotation='vertical')  
     plt.show()
   
   ks, knn_results = list(range(1, min(32, len(train_x)-1))), {'test_acc': [], 'test_f1': []}
@@ -348,30 +339,27 @@ def sweep_classifiers(results, reduce=2, scale=True, plot=False, tsne=False, con
     plt.plot(cs, values, label=name)
   plt.legend()
   plt.show()
+            
 
-  
-def show_description_importances(results, markdown=True, k=3):
-  
-  report = ''
-  
-  class_coefs = results['classifier'].coef_
-  if class_coefs.shape[0] == 1:
-    class_coefs = np.concatenate([-class_coefs, class_coefs])
+def get_single_performance(clf=None, train_x=None, train_y=None, test_x=None, test_y=None, results=None):
     
-  descriptions = results['descriptions']
-  label_names = results['label_names']
+  if results:
+    train_x, test_x = results['train_x'], results['test_x']
+    train_y, test_y = results['train_y'], results['test_y']
 
-  for name, coefs in zip(label_names, class_coefs):
-    if markdown:
-      report += f'### {name}\n\n'
-    else:
-      report += f'{name}\n'
-      
-    for idx in coefs.argsort()[-1:-(k+1):-1]:
-      if markdown:
-        report += f'`{descriptions[idx]}`: **{coefs[idx]:.3f}**\n\n'
-      else:
-        report += f'{descriptions[idx]}:\t {coefs[idx]:.3f}\n'
-  return report
-            
-            
+    clf = clone(results['classifier'])
+
+  accs, f1s = [], []
+
+  for i in range(4):
+    num_cls = len(np.unique(train_y))
+    num_desc = train_x.shape[1] // num_cls
+    indices = np.arange(num_cls) * num_desc + i
+
+    train_xi, test_xi = train_x[:, indices], test_x[:, indices]
+
+    single_res = run_classifier(clf, train_xi, train_y, test_xi, test_y)
+    accs.append(single_res['test_acc'])
+    f1s.append(single_res['test_f1'])
+
+  return {'single_acc': np.array(accs), 'single_f1': np.array(f1s)}

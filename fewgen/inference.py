@@ -1,3 +1,4 @@
+import os
 from functools import lru_cache
 import torch
 
@@ -48,7 +49,7 @@ def extend_input(input_, descriptions):
   return new_input_ids.long(), new_att_mask.long()
 
 
-generation_cache = LRUCache(maxsize=64)
+generation_cache = LRUCache(maxsize=16)
 generation_lock = Lock()
 
 def clear_generation_cache():
@@ -58,6 +59,7 @@ def clear_generation_cache():
 @cached(cache=generation_cache, key=tensor_hashkey, lock=generation_lock)
 @torch.no_grad()
 def get_next_probs(model, inputs):
+  model.eval()
   input_ids, att_mask = inputs
   batch_size = len(input_ids)
   device = model.device
@@ -97,6 +99,7 @@ def clear_perplexity_cache():
 
 @torch.no_grad()
 def get_embedding(model, inputs, mode='last_emb'):
+  model.eval()
   device = model.device
   input_ids, att_mask = inputs
   batch_size = len(input_ids)
@@ -124,7 +127,6 @@ def get_embedding(model, inputs, mode='last_emb'):
     
   else:
     raise ValueError(f'invalid mode: {mode} expcted one of `last_emb`, `avg_emb`')
-  
 
 
 # perplexity_cache = LRUCache(maxsize=128)
@@ -132,7 +134,8 @@ def get_embedding(model, inputs, mode='last_emb'):
 
 # @cached(cache=perplexity_cache, key=tensor_hashkey, lock=perplexity_lock)
 @torch.no_grad()
-def compute_ppl(model, inputs, labels, reduction='none'):
+def compute_ppl(model, inputs, labels): # reduction='none'
+  model.eval()
   device = model.device
   input_ids, att_mask = inputs
   
@@ -145,11 +148,51 @@ def compute_ppl(model, inputs, labels, reduction='none'):
 
   shift_logits = lm_logits[..., :-1, :].contiguous()
   shift_labels = labels[..., 1:].contiguous().to(device)
+  
+  ppl_mask = (shift_labels != -100).long()
+  ppl_mask *= att_mask[..., 1:].to(device)
+  
+  shift_labels *= ppl_mask
+  
+  logprobs = torch.gather(shift_logits.log_softmax(-1), dim=2, index=shift_labels.unsqueeze(-1)).squeeze(-1)
+  
+#   print(logprobs)
+#   print(ppl_mask)
 
-  loss_fn = torch.nn.CrossEntropyLoss(reduction=reduction).to(device)
+  logprobs = (logprobs.exp() + float(os.environ.get('smooth', '0.0'))).log()
+  logprobs *= ppl_mask
+  
+  mean_logprob = logprobs.sum(dim=1) / ppl_mask.sum(dim=1)
+#   print(ppl_mask.sum(dim=1))
+#   print(mean_logprob)
+#   print(mean_logprob.exp())
+  
+  return (mean_logprob.exp() ** -1).cpu()
+  
 
-  lm_loss = loss_fn(shift_logits.swapaxes(1,2), shift_labels)
-  return lm_loss.cpu()
+#   loss_fn = torch.nn.CrossEntropyLoss(reduction=reduction).to(device)
+
+#   lm_loss = loss_fn(shift_logits.swapaxes(1,2), shift_labels)
+#   return lm_loss.cpu()
+
+
+@torch.no_grad()
+def compute_all_probs(model, inputs):
+  model.eval()
+  device = model.device
+  input_ids, att_mask = inputs
+  
+  prepared_inputs = model.prepare_inputs_for_generation(
+    input_ids.to(device), attention_mask=att_mask.to(device)
+  )
+  
+  outputs = model(**prepared_inputs, return_dict=True)
+  lm_logits = outputs['logits']
+
+  shift_logits = lm_logits[..., :-1, :].contiguous()
+  shift_labels = input_ids[..., 1:].contiguous().to(device)
+
+  return torch.gather(shift_logits.softmax(-1), dim=2, index=shift_labels.unsqueeze(-1)).squeeze(-1).cpu()
 
 
 def compute_batch_ppl_change(model, inputs, description):
@@ -164,7 +207,7 @@ def compute_batch_ppl_change(model, inputs, description):
   pri_ppl = compute_ppl(model, (desc_ids.unsqueeze(0), desc_mask.unsqueeze(0)),
                         desc_labels.unsqueeze(0))
 
-  pri_ppl = pri_ppl.sum(dim=1) / desc_len
+#   pri_ppl = pri_ppl.sum(dim=1) / desc_len
 
   full_ids, full_mask = extend_batch_input(inputs, description)
   full_labels = full_ids.clone()
@@ -172,8 +215,8 @@ def compute_batch_ppl_change(model, inputs, description):
   full_labels[:, :max_input_len+prompt_len] = -100
   post_ppl = compute_ppl(model, (full_ids, full_mask), full_labels)
 
-  post_ppl = post_ppl.sum(dim=1) / desc_len
-  return (pri_ppl - post_ppl).exp()
+#   post_ppl = post_ppl.sum(dim=1) / desc_len
+  return pri_ppl / post_ppl
 
 
 def compute_ppl_changes(model, input_, descriptions):
@@ -190,11 +233,11 @@ def compute_ppl_changes(model, input_, descriptions):
     desc_labels[i, :prompt_len] = -100
   
   pri_ppl = compute_ppl(model, (desc_ids, desc_mask), desc_labels)
-  for i, d in enumerate(descriptions):
-    prompt_len = len(d.prompt)
-    desc_mask[i, :prompt_len] = 0
+#   for i, d in enumerate(descriptions):
+#     prompt_len = len(d.prompt)
+#     desc_mask[i, :prompt_len] = 0
   
-  pri_ppl = pri_ppl.sum(dim=1) / desc_mask.sum(dim=1)
+#   pri_ppl = pri_ppl.sum(dim=1) / desc_mask.sum(dim=1)
   
   full_ids, full_mask = extend_input(input_, descriptions)
   full_labels = full_ids.clone()
@@ -204,11 +247,11 @@ def compute_ppl_changes(model, input_, descriptions):
     full_labels[i, :max_input_len+prompt_len] = -100
   
   post_ppl = compute_ppl(model, (full_ids, full_mask), full_labels)
-  for i, d in enumerate(descriptions):
-    prompt_len = len(d.prompt)
-    full_mask[i, :max_input_len+prompt_len] = 0
+#   for i, d in enumerate(descriptions):
+#     prompt_len = len(d.prompt)
+#     full_mask[i, :max_input_len+prompt_len] = 0
     
-  post_ppl = post_ppl.sum(dim=1) / full_mask.sum(dim=1)
+#   post_ppl = post_ppl.sum(dim=1) / full_mask.sum(dim=1)
 #   print(pri_ppl, post_ppl)
-  return (pri_ppl - post_ppl).exp()
+  return pri_ppl / post_ppl
    

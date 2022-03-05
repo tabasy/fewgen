@@ -3,7 +3,7 @@
 
 Check out the [demo](https://colab.research.google.com/github/tabasy/fewgen/blob/main/demo.ipynb) in Google Colab!
 
-## Define, Train a FewGen classifier
+## Define FewGen Classifier
 First consider a single-input text classification task (our default task is `SST2`). To create a `FewgenClassifier`, we need:
 * a **language model** along with its tokenizer
 * some **descriptions** for each class of your task
@@ -46,7 +46,6 @@ descriptions = {
   ]
 }
 ```
-
 Now we are ready to instantiate a `FewgenClassifier`:
 
 ```python
@@ -62,7 +61,6 @@ To train our classifier, we need a dataset. It is supposed to be a (huggingface)
 * the `label` field, with values matching one of our defined `descriptions.keys()`
 
 Our `prepare_dataset` function, makes few-shot experiments easier, but you can create your own dataset in any way possible.
-
 
 ```python
 from fewgen.dataset import prepare_dataset
@@ -90,8 +88,7 @@ testset = testset.map(i2label)
 clear_output()
 ```
 
-It is time to train our model on the small fewshot trainset.
-
+## Training
 Without finetuning language model, the training means fitting a linear model on description scores (as high-level features).
 
 ```python

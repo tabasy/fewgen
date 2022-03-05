@@ -77,7 +77,7 @@ classifier.train(trainset, finetune_lm=True, finetune_args=dict(epochs=3))
 
 ## Inference
 Model inference could not be easier than this:
-```
+```python
 text = "I would not recommend it to anyone."
 
 pred = classifier.classify(text)[0]        # 'neg'

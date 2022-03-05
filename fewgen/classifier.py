@@ -26,7 +26,7 @@ class FewgenClassifier:
     self.tokenizer = tokenizer or AutoTokenizer.from_pretrained(base_model_name)
     self.lm = language_model or AutoModel.from_pretrained(base_model_name)
     
-    self.labels = sorted(list(descriptions.keys()))
+    self.labels = list(descriptions.keys())
     self.label2i = {lb: i for i, lb in enumerate(self.labels)}
     class_descriptions = {}
     

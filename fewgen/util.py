@@ -32,7 +32,7 @@ def pad_lists(lists, pad_value=0):
 
 
 def set_cache_dir(directory):
-  previous_dir = os.environ.get('hugging_cache_dir')
+  previous_dir = os.environ.get('hugging_cache_dir', '.')
   os.environ['hugging_cache_dir'] = directory
   
   if previous_dir is None:
@@ -74,7 +74,7 @@ def all_to(inputs, device):
   
 def resolve_model_path(model_name):
   
-  cache_root = os.environ.get('hugging_cache_dir')
+  cache_root = os.environ.get('hugging_cache_dir', '.')
   
   path_to_check = os.path.join(cache_root, 'model', model_name, 'pytorch_model.bin') 
   
@@ -109,7 +109,7 @@ def load_model(model_name, device='cuda', tokenizer_only=False):
 
 def load_dataset(dataset_name, subtask=None):
     
-  cache_root = os.environ.get('hugging_cache_dir')
+  cache_root = os.environ.get('hugging_cache_dir', '.')
   
   try:
     dataset_dir = os.path.join(dataset_name, subtask) if subtask else dataset_name

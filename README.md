@@ -83,7 +83,7 @@ text = "I would not recommend it to anyone."
 pred = classifier.classify(text)[0]        # 'neg'
 probs = classifier.predict_proba(text)[0]  # [89.1, 10.9]
 ```
-## Interpretaion
+## Interpretation
 One of the benefits of prompt-based methods (most of them), is their **interpretability**. As the prompt and the answers are in natural language and seem humanly understandable, we expect to understand how the model decides (in some degrees)!
 
 We can check how prepending the input text to a description, changes the probability of answer words (and th conditional perplexity). 
